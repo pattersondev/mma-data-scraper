@@ -50,6 +50,12 @@ type FightStats struct {
 	Opponent string
 	Event    string
 	Result   string
+	Striking StrikingStats
+	Clinch   ClinchStats
+	Ground   GroundStats
+}
+
+type StrikingStats struct {
 	SDBL_A   string
 	SDHL_A   string
 	SDLL_A   string
@@ -62,6 +68,14 @@ type FightStats struct {
 	BodyPerc string
 	HeadPerc string
 	LegPerc  string
+}
+
+type ClinchStats struct {
+	// Add clinch-specific fields here
+}
+
+type GroundStats struct {
+	// Add ground-specific fields here
 }
 
 type FightHistoryEntry struct {
@@ -100,7 +114,7 @@ func scrapeData(c *colly.Collector) []Event {
 	setupCollectorCallbacks(c, &events, &mu, visitedURLs)
 
 	// Start worker goroutines
-	for i := 0; i < 5; i++ { // Adjust the number of workers as needed
+	for i := 0; i < 3; i++ { // Adjust the number of workers as needed
 		wg.Add(1)
 		go worker(c, urlChan, &wg, visitedURLs, &mu)
 	}
@@ -140,43 +154,31 @@ func worker(c *colly.Collector, urlChan chan string, wg *sync.WaitGroup, visited
 }
 
 func setupCollectorCallbacks(c *colly.Collector, events *[]Event, mu *sync.Mutex, visitedURLs map[string]bool) {
-	c.OnHTML("a[href]", func(e *colly.HTMLElement) {
-		handleLinks(e, c, visitedURLs, mu)
+	// fighterMap := make(map[string]*Fighter)
+
+	c.OnRequest(func(r *colly.Request) {
+		handleRequest(r)
 	})
 
-	c.OnHTML("html", func(e *colly.HTMLElement) {
+	c.OnHTML("a[href]", func(e *colly.HTMLElement) {
+		handleLinks(e, c, visitedURLs, mu)
+		// currentURL := e.Request.URL.String()
+		// if strings.Contains(currentURL, "fighter/stats") {
+		// 	handleFighterStats(e, fighterMap)
+		// }
+	})
+
+	c.OnHTML("body", func(e *colly.HTMLElement) {
 		currentURL := e.Request.URL.String()
-		if strings.Contains(currentURL, "league") {
+		if strings.Contains(currentURL, "fightcenter") {
 			event := extractEventData(e)
 			mu.Lock()
 			*events = append(*events, event)
 			mu.Unlock()
 			printEventInfo(event)
+		} else {
+			fmt.Println("Unhandled page type:", currentURL)
 		}
-	})
-
-	// c.OnHTML("div.Wrapper.Card__Content", func(e *colly.HTMLElement) {
-	// 	fmt.Println("Handling fighter data for URL:", e.Request.URL.String())
-	// 	handleFighterData(e, fighterMap)
-	// })
-
-	// c.OnHTML("div.ResponsiveTable.fight-history", func(e *colly.HTMLElement) {
-	// 	fmt.Println("Handling fight history for URL:", e.Request.URL.String())
-	// 	handleFightHistory(e, fighterMap)
-	// })
-
-	// c.OnHTML("html", func(e *colly.HTMLElement) {
-	// 	currentURL := e.Request.URL.String()
-	// 	if strings.Contains(currentURL, "/mma/fighter/stats/") {
-	// 		fmt.Println("Stats page detected:", currentURL)
-	// 		handleFighterStats(e, fighterMap)
-	// 	} else {
-	// 		fmt.Println("Not a stats page:", currentURL)
-	// 	}
-	// })
-
-	c.OnRequest(func(r *colly.Request) {
-		handleRequest(r)
 	})
 }
 
@@ -198,8 +200,7 @@ func handleLinks(e *colly.HTMLElement, c *colly.Collector, visitedURLs map[strin
 
 func shouldVisitURL(url string) bool {
 	return (strings.Contains(url, "espn.com/mma/fightcenter") ||
-		strings.Contains(url, "espn.com/mma/fight") ||
-		strings.Contains(url, "espn.com/mma/fighter")) &&
+		strings.Contains(url, "espn.com/mma/fighter/")) &&
 		!strings.Contains(url, "news")
 }
 
@@ -341,12 +342,7 @@ func handleFighterData(e *colly.HTMLElement, fighterMap map[string]*Fighter) {
 	fmt.Println("Processing fighter data for:", fighterName)
 	fmt.Println("Current URL:", e.Request.URL.String())
 
-	// statsTable := e.ChildText("table.Table")
-	// fmt.Println("Stats table content:", statsTable)
-	// if statsTable != "" && strings.Contains(e.Request.URL.String(), "stats") {
-	// 	fmt.Println("Stats table found for:", fighterName)
-	// 	handleFighterStats(e, fighterMap)
-	// }
+	// currentFighter := getOrCreateFighter(fighterMap, fighterName)
 
 	// Check if it's a bio page
 	if strings.Contains(e.Request.URL.String(), "bio") {
@@ -359,6 +355,8 @@ func handleFighterData(e *colly.HTMLElement, fighterMap map[string]*Fighter) {
 		fmt.Println("Processing fight history for:", fighterName)
 		handleFightHistory(e, fighterMap)
 	}
+
+	// You can add more checks here for other types of fighter data
 }
 
 func getOrCreateFighter(fighterMap map[string]*Fighter, fighterName string) *Fighter {
@@ -377,45 +375,74 @@ func getOrCreateFighter(fighterMap map[string]*Fighter, fighterName string) *Fig
 
 func handleFighterStats(e *colly.HTMLElement, fighterMap map[string]*Fighter) {
 	fighterName := e.ChildText("h1")
-	fmt.Println("Processing stats for fighter:", fighterName)
+	fmt.Printf("Processing stats for fighter: %s\n", fighterName)
 	currentFighter := getOrCreateFighter(fighterMap, fighterName)
 
-	if e.ChildText("div.ResponsiveTable.fighter-stats") == "No available information." {
-		fmt.Printf("No stats available for fighter: %s\n", fighterName)
-		currentFighter.Stats = []FightStats{} // Empty stats array
-		return
-	}
+	statsFound := false
+	tableSelector := "#fittPageContainer > div.pageContent > div > div:nth-child(5) > div > div.PageLayout__Main > div > section > div > div:nth-child(2) > div.flex > div > div.Table__Scroller > table"
 
-	rowCount := 0
-	e.ForEach("table.Table tbody tr", func(_ int, row *colly.HTMLElement) {
-		rowCount++
-		stats := extractFightStats(row)
-		currentFighter.Stats = append(currentFighter.Stats, stats)
-		fmt.Printf("Added stats: %+v\n", stats) // Debug log
+	e.ForEach(tableSelector, func(_ int, table *colly.HTMLElement) {
+		fmt.Println("Found the target table")
+		newStats := extractStatsFromTable(table)
+		if len(newStats) > 0 {
+			currentFighter.Stats = append(currentFighter.Stats, newStats...)
+			statsFound = true
+			fmt.Printf("Extracted %d striking stats\n", len(newStats))
+		} else {
+			fmt.Println("No striking stats extracted")
+		}
 	})
 
-	fmt.Printf("Updated stats for fighter: %s, Total stats rows processed: %d\n", currentFighter.Name, rowCount)
+	if !statsFound {
+		fmt.Printf("No stats found for fighter: %s\n", fighterName)
+	} else {
+		fmt.Printf("Updated stats for fighter: %s\n", fighterName)
+	}
 }
 
-func extractFightStats(row *colly.HTMLElement) FightStats {
-	return FightStats{
-		Date:     row.ChildText("td:nth-child(1)"),
-		Opponent: row.ChildText("td:nth-child(2)"),
-		Event:    row.ChildText("td:nth-child(3)"),
-		Result:   row.ChildText("td:nth-child(4)"),
-		SDBL_A:   row.ChildText("td:nth-child(5)"),
-		SDHL_A:   row.ChildText("td:nth-child(6)"),
-		SDLL_A:   row.ChildText("td:nth-child(7)"),
-		TSL:      row.ChildText("td:nth-child(8)"),
-		TSA:      row.ChildText("td:nth-child(9)"),
-		SSL:      row.ChildText("td:nth-child(10)"),
-		SSA:      row.ChildText("td:nth-child(11)"),
-		TSL_TSA:  row.ChildText("td:nth-child(12)"),
-		KD:       row.ChildText("td:nth-child(13)"),
-		BodyPerc: row.ChildText("td:nth-child(14)"),
-		HeadPerc: row.ChildText("td:nth-child(15)"),
-		LegPerc:  row.ChildText("td:nth-child(16)"),
-	}
+func extractStatsFromTable(table *colly.HTMLElement) []FightStats {
+	var stats []FightStats
+
+	table.ForEach("tbody tr.Table__TR.Table__TR--sm", func(_ int, row *colly.HTMLElement) {
+		var cells []string
+		row.ForEach("td.Table__TD", func(_ int, cell *colly.HTMLElement) {
+			cells = append(cells, cell.Text)
+		})
+
+		if len(cells) >= 16 {
+			stat := FightStats{
+				Date:     strings.TrimSpace(cells[0]),
+				Opponent: cleanFighterName(cells[1]),
+				Event:    strings.TrimSpace(cells[2]),
+				Result:   strings.TrimSpace(strings.Split(cells[3], " ")[0]),
+				Striking: StrikingStats{
+					SDBL_A:   strings.TrimSpace(cells[4]),
+					SDHL_A:   strings.TrimSpace(cells[5]),
+					SDLL_A:   strings.TrimSpace(cells[6]),
+					TSL:      strings.TrimSpace(cells[7]),
+					TSA:      strings.TrimSpace(cells[8]),
+					SSL:      strings.TrimSpace(cells[9]),
+					SSA:      strings.TrimSpace(cells[10]),
+					TSL_TSA:  strings.TrimSpace(cells[11]),
+					KD:       strings.TrimSpace(cells[12]),
+					BodyPerc: strings.TrimSpace(cells[13]),
+					HeadPerc: strings.TrimSpace(cells[14]),
+					LegPerc:  strings.TrimSpace(cells[15]),
+				},
+			}
+
+			// Handle cases where stats are not available
+			if stat.Striking.SDBL_A == "-" {
+				stat.Striking = StrikingStats{}
+			}
+
+			stats = append(stats, stat)
+			fmt.Printf("Extracted stat: %+v\n", stat)
+		}
+	})
+
+	fmt.Printf("Total rows processed: %d\n", len(stats))
+	return stats
 }
 
 func handleFighterBio(e *colly.HTMLElement, fighterMap map[string]*Fighter) {
