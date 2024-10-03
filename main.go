@@ -80,7 +80,6 @@ func main() {
 	fmt.Printf("Total events found: %d\n", len(events))
 
 	writeEventDataToJSON(events)
-	// Note: You may need to adjust the fighter data writing if needed
 }
 
 func initializeCollector() *colly.Collector {
