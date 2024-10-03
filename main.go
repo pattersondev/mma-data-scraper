@@ -24,6 +24,7 @@ type FightData struct {
 	Fighter1 string
 	Fighter2 string
 	Result   string
+	Winner   string
 }
 
 type Fighter struct {
@@ -236,13 +237,27 @@ func extractEventData(e *colly.HTMLElement) Event {
 		if len(fighters) >= 2 {
 			fighter1 := cleanFighterName(fighters[0])
 			fighter2 := cleanFighterName(fighters[len(fighters)-1])
-			result = cleanResult(result)
+			cleanedResult := cleanResult(result)
+
+			// Determine the winner based on the SVG element
+			var winner string
+			if cleanedResult == "" {
+				// Future fight, leave winner blank
+				winner = ""
+			} else if el.ChildAttr("svg.MMACompetitor__arrow--reverse", "class") != "" {
+				winner = fighter1
+			} else if el.ChildAttr("svg.MMACompetitor__arrow:not(.MMACompetitor__arrow--reverse)", "class") != "" {
+				winner = fighter2
+			} else {
+				winner = "Draw/No Contest"
+			}
 
 			if fighter1 != "" && fighter2 != "" && fighter1 != fighter2 {
 				fight := FightData{
 					Fighter1: fighter1,
 					Fighter2: fighter2,
-					Result:   result,
+					Result:   cleanedResult,
+					Winner:   winner,
 				}
 				event.Matchups = append(event.Matchups, fight)
 			}
@@ -349,7 +364,7 @@ func printEventInfo(event Event) {
 	fmt.Printf("Event: %s, Date: %s, Location: %s\n", event.Name, event.Date, event.Location)
 	fmt.Printf("Total matchups: %d\n", len(event.Matchups))
 	for _, matchup := range event.Matchups {
-		fmt.Printf("  %s vs %s - Result: %s\n", matchup.Fighter1, matchup.Fighter2, matchup.Result)
+		fmt.Printf("  %s vs %s - Result: %s, Winner: %s\n", matchup.Fighter1, matchup.Fighter2, matchup.Result, matchup.Winner)
 	}
 }
 
