@@ -249,29 +249,44 @@ func extractEventData(e *colly.HTMLElement) Event {
 		}
 	})
 
-	event.Matchups = removeDuplicateMatchups(event.Matchups)
+	event.Matchups = consolidateMatchups(event.Matchups)
 
 	return event
 }
 
-func removeDuplicateMatchups(matchups []FightData) []FightData {
-	seen := make(map[string]bool)
-	var uniqueMatchups []FightData
+func consolidateMatchups(matchups []FightData) []FightData {
+	consolidated := make(map[string]FightData)
 
 	for _, matchup := range matchups {
-		key := fmt.Sprintf("%s|%s|%s", matchup.Fighter1, matchup.Fighter2, matchup.Result)
-		if !seen[key] {
-			seen[key] = true
-			uniqueMatchups = append(uniqueMatchups, matchup)
+		key := fmt.Sprintf("%s vs %s", matchup.Fighter1, matchup.Fighter2)
+		reverseKey := fmt.Sprintf("%s vs %s", matchup.Fighter2, matchup.Fighter1)
+
+		existing, exists := consolidated[key]
+		if !exists {
+			existing, exists = consolidated[reverseKey]
+		}
+
+		if !exists || (len(matchup.Result) > 0 && len(existing.Result) == 0) {
+			consolidated[key] = matchup
 		}
 	}
 
-	return uniqueMatchups
+	result := make([]FightData, 0, len(consolidated))
+	for _, matchup := range consolidated {
+		if matchup.Fighter1 != "Full Profile1KD032/60TOT" && matchup.Fighter2 != "Full Profile1KD032/60TOT" {
+			result = append(result, matchup)
+		}
+	}
+
+	return result
 }
 
 func cleanFighterName(name string) string {
 	// Remove any numbers (usually record) from the name
 	name = regexp.MustCompile(`\d+-\d+-\d+`).ReplaceAllString(name, "")
+
+	// Remove any text in parentheses
+	name = regexp.MustCompile(`\(.*?\)`).ReplaceAllString(name, "")
 
 	// Split the name by spaces
 	parts := strings.Fields(name)
@@ -288,6 +303,12 @@ func cleanResult(result string) string {
 	result = strings.TrimSpace(result)
 	if strings.Contains(strings.ToLower(result), "ppv") || strings.Contains(strings.ToLower(result), "espn+") {
 		return "" // Return empty string for future fights
+	}
+
+	// Keep only the first part of the result (e.g., "FinalKO/TKOR1, 0:21")
+	parts := strings.SplitN(result, "Final", 2)
+	if len(parts) > 1 {
+		return "Final" + strings.SplitN(parts[1], "Final", 2)[0]
 	}
 	return result
 }
