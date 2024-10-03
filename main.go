@@ -1,23 +1,29 @@
 package main
 
 import (
-	"encoding/csv"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
+	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gocolly/colly/v2"
 )
 
+type Event struct {
+	Name     string
+	Date     string
+	Location string
+	Matchups []FightData
+}
+
 type FightData struct {
-	EventName     string
-	EventDate     string
-	EventLocation string
-	Fighter1      string
-	Fighter2      string
-	Result        string
+	Fighter1 string
+	Fighter2 string
+	Result   string
 }
 
 type Fighter struct {
@@ -69,12 +75,12 @@ type FightHistoryEntry struct {
 
 func main() {
 	c := initializeCollector()
-	allFights, fighterMap := scrapeData(c)
+	events := scrapeData(c)
 
-	fmt.Printf("Total fights found: %d\n", len(allFights))
+	fmt.Printf("Total events found: %d\n", len(events))
 
-	writeEventDataToCSV(allFights)
-	writeFighterDataToCSV(fighterMap)
+	writeEventDataToJSON(events)
+	// Note: You may need to adjust the fighter data writing if needed
 }
 
 func initializeCollector() *colly.Collector {
@@ -84,120 +90,269 @@ func initializeCollector() *colly.Collector {
 	)
 }
 
-func scrapeData(c *colly.Collector) ([]FightData, map[string]*Fighter) {
-	var allFights []FightData
-	fighterMap := make(map[string]*Fighter)
+func scrapeData(c *colly.Collector) []Event {
+	var events []Event
+	var mu sync.Mutex
 	visitedURLs := make(map[string]bool)
+	urlChan := make(chan string, 100)
+	var wg sync.WaitGroup
 
-	setupCollectorCallbacks(c, &allFights, fighterMap, visitedURLs)
+	setupCollectorCallbacks(c, &events, &mu, visitedURLs)
 
-	err := c.Visit("https://www.espn.com/mma/fightcenter")
-	if err != nil {
-		log.Fatal(err)
+	// Start worker goroutines
+	for i := 0; i < 5; i++ { // Adjust the number of workers as needed
+		wg.Add(1)
+		go worker(c, urlChan, &wg, visitedURLs, &mu)
 	}
 
-	return allFights, fighterMap
+	// Send initial URL
+	urlChan <- "https://www.espn.com/mma/fightcenter"
+
+	// Close channel when all URLs have been processed
+	go func() {
+		wg.Wait()
+		close(urlChan)
+	}()
+
+	// Wait for all goroutines to finish
+	wg.Wait()
+
+	return events
 }
 
-func setupCollectorCallbacks(c *colly.Collector, allFights *[]FightData, fighterMap map[string]*Fighter, visitedURLs map[string]bool) {
+func worker(c *colly.Collector, urlChan chan string, wg *sync.WaitGroup, visitedURLs map[string]bool, mu *sync.Mutex) {
+	defer wg.Done()
+
+	for url := range urlChan {
+		mu.Lock()
+		if visitedURLs[url] {
+			mu.Unlock()
+			continue
+		}
+		visitedURLs[url] = true
+		mu.Unlock()
+
+		err := c.Visit(url)
+		if err != nil {
+			fmt.Printf("Error visiting %s: %v\n", url, err)
+		}
+	}
+}
+
+func setupCollectorCallbacks(c *colly.Collector, events *[]Event, mu *sync.Mutex, visitedURLs map[string]bool) {
 	c.OnHTML("a[href]", func(e *colly.HTMLElement) {
-		handleLinks(e, c, visitedURLs)
+		handleLinks(e, c, visitedURLs, mu)
 	})
 
-	c.OnHTML(".ResponsiveWrapper", func(e *colly.HTMLElement) {
-		handleFightData(e, allFights)
+	c.OnHTML("html", func(e *colly.HTMLElement) {
+		currentURL := e.Request.URL.String()
+		if strings.Contains(currentURL, "league") {
+			event := extractEventData(e)
+			mu.Lock()
+			*events = append(*events, event)
+			mu.Unlock()
+			printEventInfo(event)
+		}
 	})
 
-	c.OnHTML("div.Wrapper.Card__Content", func(e *colly.HTMLElement) {
-		fmt.Println("Handling fighter data for URL:", e.Request.URL.String())
-		handleFighterData(e, fighterMap)
-	})
+	// c.OnHTML("div.Wrapper.Card__Content", func(e *colly.HTMLElement) {
+	// 	fmt.Println("Handling fighter data for URL:", e.Request.URL.String())
+	// 	handleFighterData(e, fighterMap)
+	// })
 
-	c.OnHTML("div.ResponsiveTable.fight-history", func(e *colly.HTMLElement) {
-		fmt.Println("Handling fight history for URL:", e.Request.URL.String())
-		handleFightHistory(e, fighterMap)
-	})
+	// c.OnHTML("div.ResponsiveTable.fight-history", func(e *colly.HTMLElement) {
+	// 	fmt.Println("Handling fight history for URL:", e.Request.URL.String())
+	// 	handleFightHistory(e, fighterMap)
+	// })
 
-	c.OnHTML("div.ResponsiveTable.fighter-stats", func(e *colly.HTMLElement) {
-		fmt.Println("Stats page detected:", e.Request.URL.String())
-		handleFighterStats(e, fighterMap)
-	})
-
-	c.OnHTML("div.PlayerBio", func(e *colly.HTMLElement) {
-		fmt.Println("Bio page detected:", e.Request.URL.String())
-		handleFighterBio(e, fighterMap)
-	})
+	// c.OnHTML("html", func(e *colly.HTMLElement) {
+	// 	currentURL := e.Request.URL.String()
+	// 	if strings.Contains(currentURL, "/mma/fighter/stats/") {
+	// 		fmt.Println("Stats page detected:", currentURL)
+	// 		handleFighterStats(e, fighterMap)
+	// 	} else {
+	// 		fmt.Println("Not a stats page:", currentURL)
+	// 	}
+	// })
 
 	c.OnRequest(func(r *colly.Request) {
 		handleRequest(r)
 	})
 }
 
-func handleLinks(e *colly.HTMLElement, c *colly.Collector, visitedURLs map[string]bool) {
+func handleLinks(e *colly.HTMLElement, c *colly.Collector, visitedURLs map[string]bool, mu *sync.Mutex) {
 	link := e.Attr("href")
 	absoluteURL := e.Request.AbsoluteURL(link)
-	if !visitedURLs[absoluteURL] &&
-		(strings.Contains(absoluteURL, "espn.com/mma/fightcenter") ||
-			strings.Contains(absoluteURL, "espn.com/mma/fight") ||
-			strings.Contains(absoluteURL, "espn.com/mma/fighter")) &&
-		!strings.Contains(absoluteURL, "news") {
-		visitedURLs[absoluteURL] = true
-		fmt.Println("Queuing", absoluteURL)
-		err := c.Visit(absoluteURL)
-		if err != nil {
-			fmt.Printf("Error visiting %s: %v\n", absoluteURL, err)
+	if shouldVisitURL(absoluteURL) {
+		mu.Lock()
+		if !visitedURLs[absoluteURL] {
+			visitedURLs[absoluteURL] = true
+			mu.Unlock()
+			fmt.Println("Queuing", absoluteURL)
+			c.Visit(absoluteURL)
+		} else {
+			mu.Unlock()
 		}
 	}
 }
 
-func handleFightData(e *colly.HTMLElement, allFights *[]FightData) {
-	fight := extractFightData(e)
-	*allFights = append(*allFights, fight)
-	printFightInfo(fight)
+func shouldVisitURL(url string) bool {
+	return (strings.Contains(url, "espn.com/mma/fightcenter") ||
+		strings.Contains(url, "espn.com/mma/fight") ||
+		strings.Contains(url, "espn.com/mma/fighter")) &&
+		!strings.Contains(url, "news")
 }
 
-func extractFightData(e *colly.HTMLElement) FightData {
-	fight := FightData{
-		EventName:     e.ChildText(".MMAFightCard__GameNote"),
-		Fighter1:      e.ChildText(".MMACompetitor:first-child .MMACompetitor__Detail h2"),
-		Fighter2:      e.ChildText(".MMACompetitor:last-child .MMACompetitor__Detail h2"),
-		Result:        e.ChildText(".Gamestrip__Overview .ScoreCell__Time--post h3"),
-		EventDate:     e.ChildText(".Gamestrip__Overview .ScoreCell__Time--post .n9"),
-		EventLocation: e.ChildText(".MMAEventHeader__Event .n8.clr-gray-04"),
+func extractEventData(e *colly.HTMLElement) Event {
+	fmt.Println("Extracting event data from:", e.Request.URL.String())
+
+	eventName := e.ChildText(".headline.headline__h1.mb3")
+	if eventName == "" {
+		eventName = e.ChildText("h1.headline") // Alternative selector
 	}
 
-	e.ForEach(".Gamestrip__Overview .ScoreCell__Time--post div", func(_ int, el *colly.HTMLElement) {
-		if el.Index == 1 {
-			fight.Result += " - " + el.Text
+	eventDate := e.ChildText(".n6.mb2")
+	if eventDate == "" {
+		eventDate = e.ChildText(".n6") // Alternative selector
+	}
+	eventDate = extractDateOnly(eventDate)
+
+	eventLocation := e.ChildText("div.n8.clr-gray-04")
+	if eventLocation == "" {
+		eventLocation = e.ChildText(".n8") // Alternative selector
+	}
+	eventLocation = extractLocationOnly(eventLocation)
+
+	event := Event{
+		Name:     eventName,
+		Date:     eventDate,
+		Location: eventLocation,
+		Matchups: []FightData{},
+	}
+
+	e.ForEach("div[class*='Card']", func(_ int, el *colly.HTMLElement) {
+		fighters := el.ChildTexts("[class*='fighter'], [class*='Fighter'], [class*='competitor'], [class*='Competitor']")
+		result := el.ChildText("[class*='result'], [class*='Result'], [class*='score'], [class*='Score']")
+
+		if len(fighters) >= 2 {
+			fighter1 := cleanFighterName(fighters[0])
+			fighter2 := cleanFighterName(fighters[len(fighters)-1])
+			result = cleanResult(result)
+
+			if fighter1 != "" && fighter2 != "" && fighter1 != fighter2 {
+				fight := FightData{
+					Fighter1: fighter1,
+					Fighter2: fighter2,
+					Result:   result,
+				}
+				event.Matchups = append(event.Matchups, fight)
+			}
 		}
 	})
 
-	return fight
+	event.Matchups = removeDuplicateMatchups(event.Matchups)
+
+	return event
 }
 
-func printFightInfo(fight FightData) {
-	fmt.Printf("Fight found: %s vs %s - Result: %s\nEvent: %s, Date: %s, Location: %s\n",
-		fight.Fighter1, fight.Fighter2, fight.Result, fight.EventName, fight.EventDate, fight.EventLocation)
+func removeDuplicateMatchups(matchups []FightData) []FightData {
+	seen := make(map[string]bool)
+	var uniqueMatchups []FightData
+
+	for _, matchup := range matchups {
+		key := fmt.Sprintf("%s|%s|%s", matchup.Fighter1, matchup.Fighter2, matchup.Result)
+		if !seen[key] {
+			seen[key] = true
+			uniqueMatchups = append(uniqueMatchups, matchup)
+		}
+	}
+
+	return uniqueMatchups
+}
+
+func cleanFighterName(name string) string {
+	// Remove any numbers (usually record) from the name
+	name = regexp.MustCompile(`\d+-\d+-\d+`).ReplaceAllString(name, "")
+
+	// Split the name by spaces
+	parts := strings.Fields(name)
+
+	// Take the first two parts (assuming they are the first and last name)
+	if len(parts) >= 2 {
+		return strings.Join(parts[:2], " ")
+	}
+
+	return strings.TrimSpace(name)
+}
+
+func cleanResult(result string) string {
+	result = strings.TrimSpace(result)
+	if strings.Contains(strings.ToLower(result), "ppv") || strings.Contains(strings.ToLower(result), "espn+") {
+		return "" // Return empty string for future fights
+	}
+	return result
+}
+
+// Update this function to include the year
+func extractDateOnly(fullText string) string {
+	// Assuming the date is always at the beginning and in the format "Month Day, Year"
+	dateParts := strings.SplitN(fullText, ",", 3)
+	if len(dateParts) >= 2 {
+		// Combine the month/day with the year
+		return strings.TrimSpace(dateParts[0] + "," + dateParts[1])
+	}
+	return ""
+}
+
+func extractLocationOnly(fullText string) string {
+	// List of keywords that typically appear after the location
+	keywords := []string{"Final", "PPV", "ESPN+", "ESPN", "FOX", "FS1", "FS2", "Max"}
+
+	// Find the first occurrence of any keyword
+	index := len(fullText)
+	for _, keyword := range keywords {
+		if idx := strings.Index(fullText, keyword); idx != -1 && idx < index {
+			index = idx
+		}
+	}
+
+	// Extract the substring before the first keyword
+	location := fullText[:index]
+
+	// Remove any trailing commas and whitespace
+	location = strings.TrimRight(location, ", ")
+
+	return strings.TrimSpace(location)
+}
+
+func printEventInfo(event Event) {
+	fmt.Printf("Event: %s, Date: %s, Location: %s\n", event.Name, event.Date, event.Location)
+	fmt.Printf("Total matchups: %d\n", len(event.Matchups))
+	for _, matchup := range event.Matchups {
+		fmt.Printf("  %s vs %s - Result: %s\n", matchup.Fighter1, matchup.Fighter2, matchup.Result)
+	}
 }
 
 func handleFighterData(e *colly.HTMLElement, fighterMap map[string]*Fighter) {
 	fighterName := e.ChildText("h1")
 	fmt.Println("Processing fighter data for:", fighterName)
+	fmt.Println("Current URL:", e.Request.URL.String())
 
-	// Check if it's a stats page
-	if e.DOM.Find("div.ResponsiveTable.fighter-stats").Length() > 0 {
-		fmt.Println("Processing stats for:", fighterName)
-		handleFighterStats(e, fighterMap)
-	}
+	// statsTable := e.ChildText("table.Table")
+	// fmt.Println("Stats table content:", statsTable)
+	// if statsTable != "" && strings.Contains(e.Request.URL.String(), "stats") {
+	// 	fmt.Println("Stats table found for:", fighterName)
+	// 	handleFighterStats(e, fighterMap)
+	// }
 
 	// Check if it's a bio page
-	if e.DOM.Find("div.PlayerBio").Length() > 0 {
+	if strings.Contains(e.Request.URL.String(), "bio") {
 		fmt.Println("Processing bio for:", fighterName)
 		handleFighterBio(e, fighterMap)
 	}
 
 	// Check if it's a fight history page
-	if e.DOM.Find("div.ResponsiveTable.fight-history").Length() > 0 {
+	if e.ChildText("div.ResponsiveTable.fight-history") != "" {
 		fmt.Println("Processing fight history for:", fighterName)
 		handleFightHistory(e, fighterMap)
 	}
@@ -221,11 +376,22 @@ func handleFighterStats(e *colly.HTMLElement, fighterMap map[string]*Fighter) {
 	fighterName := e.ChildText("h1")
 	fmt.Println("Processing stats for fighter:", fighterName)
 	currentFighter := getOrCreateFighter(fighterMap, fighterName)
-	e.ForEach("tr.Table__TR", func(_ int, row *colly.HTMLElement) {
+
+	if e.ChildText("div.ResponsiveTable.fighter-stats") == "No available information." {
+		fmt.Printf("No stats available for fighter: %s\n", fighterName)
+		currentFighter.Stats = []FightStats{} // Empty stats array
+		return
+	}
+
+	rowCount := 0
+	e.ForEach("table.Table tbody tr", func(_ int, row *colly.HTMLElement) {
+		rowCount++
 		stats := extractFightStats(row)
 		currentFighter.Stats = append(currentFighter.Stats, stats)
+		fmt.Printf("Added stats: %+v\n", stats) // Debug log
 	})
-	fmt.Printf("Updated stats for fighter: %s\n", currentFighter.Name)
+
+	fmt.Printf("Updated stats for fighter: %s, Total stats rows processed: %d\n", currentFighter.Name, rowCount)
 }
 
 func extractFightStats(row *colly.HTMLElement) FightStats {
@@ -319,114 +485,36 @@ func handleRequest(r *colly.Request) {
 	}
 }
 
-func writeEventDataToCSV(allFights []FightData) {
-	csvFileName := fmt.Sprintf("espn_mma_fights_%s.csv", time.Now().Format("2006-01-02_15-04-05"))
-	file, err := os.Create(csvFileName)
+func writeEventDataToJSON(events []Event) {
+	jsonFileName := fmt.Sprintf("events%s.json", time.Now().Format("2006-01-02_15-04-05"))
+	file, err := os.Create(jsonFileName)
 	if err != nil {
 		log.Fatal("Cannot create file", err)
 	}
 	defer file.Close()
 
-	writer := csv.NewWriter(file)
-	defer writer.Flush()
-
-	header := []string{"Event Name", "Event Date", "Event Location", "Fighter 1", "Fighter 2", "Result"}
-	if err := writer.Write(header); err != nil {
-		log.Fatal("Error writing header to CSV:", err)
+	encoder := json.NewEncoder(file)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(events); err != nil {
+		log.Fatal("Error writing to JSON:", err)
 	}
 
-	for _, fight := range allFights {
-		record := []string{
-			fight.EventName,
-			fight.EventDate,
-			fight.EventLocation,
-			fight.Fighter1,
-			fight.Fighter2,
-			fight.Result,
-		}
-		if err := writer.Write(record); err != nil {
-			log.Fatal("Error writing record to CSV:", err)
-		}
-	}
-
-	fmt.Printf("Event data CSV file created: %s\n", csvFileName)
+	fmt.Printf("Event data JSON file created: %s\n", jsonFileName)
 }
 
-func writeFighterDataToCSV(fighterMap map[string]*Fighter) {
-	csvFileName := fmt.Sprintf("espn_mma_fighters_%s.csv", time.Now().Format("2006-01-02_15-04-05"))
-	file, err := os.Create(csvFileName)
+func writeFighterDataToJSON(fighterMap map[string]*Fighter) {
+	jsonFileName := fmt.Sprintf("fighters%s.json", time.Now().Format("2006-01-02_15-04-05"))
+	file, err := os.Create(jsonFileName)
 	if err != nil {
 		log.Fatal("Cannot create file", err)
 	}
 	defer file.Close()
 
-	writer := csv.NewWriter(file)
-	defer writer.Flush()
-
-	header := []string{
-		"Name", "Country", "Weight Class", "Height/Weight", "Birthdate", "Team", "Nickname", "Stance", "Reach",
-		"Stats_Date", "Stats_Opponent", "Stats_Event", "Stats_Result", "Stats_SDBL_A", "Stats_SDHL_A", "Stats_SDLL_A",
-		"Stats_TSL", "Stats_TSA", "Stats_SSL", "Stats_SSA", "Stats_TSL_TSA", "Stats_KD", "Stats_BodyPerc", "Stats_HeadPerc", "Stats_LegPerc",
-		"History_Date", "History_Opponent", "History_Result", "History_Decision", "History_Round", "History_Time", "History_Event",
-	}
-	if err := writer.Write(header); err != nil {
-		log.Fatal("Error writing header to CSV:", err)
+	encoder := json.NewEncoder(file)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(fighterMap); err != nil {
+		log.Fatal("Error writing to JSON:", err)
 	}
 
-	for _, fighter := range fighterMap {
-		// Determine the maximum number of entries (either stats or fight history)
-		maxEntries := max(len(fighter.Stats), len(fighter.FightHistory))
-
-		for i := 0; i < maxEntries; i++ {
-			record := []string{
-				fighter.Name,
-				fighter.Bio.Country,
-				fighter.Bio.WTClass,
-				fighter.Bio.HTWT,
-				fighter.Bio.Birthdate,
-				fighter.Bio.Team,
-				fighter.Bio.Nickname,
-				fighter.Bio.Stance,
-				fighter.Bio.Reach,
-			}
-
-			// Add Stats data if available
-			if i < len(fighter.Stats) {
-				stats := fighter.Stats[i]
-				record = append(record,
-					stats.Date, stats.Opponent, stats.Event, stats.Result,
-					stats.SDBL_A, stats.SDHL_A, stats.SDLL_A, stats.TSL,
-					stats.TSA, stats.SSL, stats.SSA, stats.TSL_TSA,
-					stats.KD, stats.BodyPerc, stats.HeadPerc, stats.LegPerc,
-				)
-			} else {
-				record = append(record, make([]string, 16)...) // Add 16 empty fields for stats
-			}
-
-			// Add Fight History data if available
-			if i < len(fighter.FightHistory) {
-				history := fighter.FightHistory[i]
-				record = append(record,
-					history.Date, history.Opponent, history.Result,
-					history.Decision, history.Round, history.Time, history.Event,
-				)
-			} else {
-				record = append(record, make([]string, 7)...) // Add 7 empty fields for fight history
-			}
-
-			if err := writer.Write(record); err != nil {
-				log.Fatal("Error writing record to CSV:", err)
-			}
-		}
-	}
-
-	fmt.Printf("Fighter data CSV file created: %s\n", csvFileName)
-}
-
-// Helper function to determine the maximum of two integers
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
+	fmt.Printf("Fighter data JSON file created: %s\n", jsonFileName)
 }
