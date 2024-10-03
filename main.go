@@ -230,70 +230,38 @@ func extractEventData(e *colly.HTMLElement) Event {
 		Matchups: []FightData{},
 	}
 
-	e.ForEach("div[class*='Card']", func(_ int, el *colly.HTMLElement) {
-		fighters := el.ChildTexts("[class*='fighter'], [class*='Fighter'], [class*='competitor'], [class*='Competitor']")
-		result := el.ChildText("[class*='result'], [class*='Result'], [class*='score'], [class*='Score']")
+	e.ForEach("div.MMAGamestrip", func(_ int, el *colly.HTMLElement) {
+		fighter1 := cleanFighterName(el.ChildText("div.MMACompetitor:first-child h2"))
+		fighter2 := cleanFighterName(el.ChildText("div.MMACompetitor:last-child h2"))
 
-		if len(fighters) >= 2 {
-			fighter1 := cleanFighterName(fighters[0])
-			fighter2 := cleanFighterName(fighters[len(fighters)-1])
-			cleanedResult := cleanResult(result)
+		result := el.ChildText("div.Gamestrip__Overview .ScoreCell__Time--post")
+		cleanedResult := cleanResult(result)
 
-			// Determine the winner based on the SVG element
-			var winner string
-			if cleanedResult == "" {
-				// Future fight, leave winner blank
-				winner = ""
-			} else if el.ChildAttr("svg.MMACompetitor__arrow--reverse", "class") != "" {
+		var winner string
+		if cleanedResult == "" {
+			winner = ""
+		} else if el.ChildAttr("svg.MMACompetitor__arrow", "class") != "" {
+			if strings.Contains(el.ChildAttr("svg.MMACompetitor__arrow", "class"), "--reverse") {
 				winner = fighter1
-			} else if el.ChildAttr("svg.MMACompetitor__arrow:not(.MMACompetitor__arrow--reverse)", "class") != "" {
-				winner = fighter2
 			} else {
-				winner = "Draw/No Contest"
+				winner = fighter2
 			}
+		} else {
+			winner = "Draw/No Contest"
+		}
 
-			if fighter1 != "" && fighter2 != "" && fighter1 != fighter2 {
-				fight := FightData{
-					Fighter1: fighter1,
-					Fighter2: fighter2,
-					Result:   cleanedResult,
-					Winner:   winner,
-				}
-				event.Matchups = append(event.Matchups, fight)
+		if fighter1 != "" && fighter2 != "" && fighter1 != fighter2 {
+			fight := FightData{
+				Fighter1: fighter1,
+				Fighter2: fighter2,
+				Result:   cleanedResult,
+				Winner:   winner,
 			}
+			event.Matchups = append(event.Matchups, fight)
 		}
 	})
 
-	event.Matchups = consolidateMatchups(event.Matchups)
-
 	return event
-}
-
-func consolidateMatchups(matchups []FightData) []FightData {
-	consolidated := make(map[string]FightData)
-
-	for _, matchup := range matchups {
-		key := fmt.Sprintf("%s vs %s", matchup.Fighter1, matchup.Fighter2)
-		reverseKey := fmt.Sprintf("%s vs %s", matchup.Fighter2, matchup.Fighter1)
-
-		existing, exists := consolidated[key]
-		if !exists {
-			existing, exists = consolidated[reverseKey]
-		}
-
-		if !exists || (len(matchup.Result) > 0 && len(existing.Result) == 0) {
-			consolidated[key] = matchup
-		}
-	}
-
-	result := make([]FightData, 0, len(consolidated))
-	for _, matchup := range consolidated {
-		if matchup.Fighter1 != "Full Profile1KD032/60TOT" && matchup.Fighter2 != "Full Profile1KD032/60TOT" {
-			result = append(result, matchup)
-		}
-	}
-
-	return result
 }
 
 func cleanFighterName(name string) string {
