@@ -123,7 +123,7 @@ func scrapeData(c *colly.Collector) []Event {
 	urlChan := make(chan string, 100)
 	var wg sync.WaitGroup
 
-	setupCollectorCallbacks(c, &events, &mu, visitedURLs, urlChan)
+	setupCollectorCallbacks(c, &events, &mu, visitedURLs)
 
 	// Start worker goroutines
 	for i := 0; i < 3; i++ { // Adjust the number of workers as needed
@@ -146,10 +146,18 @@ func scrapeData(c *colly.Collector) []Event {
 	return events
 }
 
-func worker(c *colly.Collector, urlChan <-chan string, wg *sync.WaitGroup, visitedURLs map[string]bool, mu *sync.Mutex) {
+func worker(c *colly.Collector, urlChan chan string, wg *sync.WaitGroup, visitedURLs map[string]bool, mu *sync.Mutex) {
 	defer wg.Done()
 
 	for url := range urlChan {
+		mu.Lock()
+		if visitedURLs[url] {
+			mu.Unlock()
+			continue
+		}
+		visitedURLs[url] = true
+		mu.Unlock()
+
 		err := c.Visit(url)
 		if err != nil {
 			fmt.Printf("Error visiting %s: %v\n", url, err)
@@ -157,7 +165,7 @@ func worker(c *colly.Collector, urlChan <-chan string, wg *sync.WaitGroup, visit
 	}
 }
 
-func setupCollectorCallbacks(c *colly.Collector, events *[]Event, mu *sync.Mutex, visitedURLs map[string]bool, urlChan chan<- string) {
+func setupCollectorCallbacks(c *colly.Collector, events *[]Event, mu *sync.Mutex, visitedURLs map[string]bool) {
 	// fighterMap := make(map[string]*Fighter)
 
 	c.OnRequest(func(r *colly.Request) {
@@ -165,7 +173,7 @@ func setupCollectorCallbacks(c *colly.Collector, events *[]Event, mu *sync.Mutex
 	})
 
 	c.OnHTML("a[href]", func(e *colly.HTMLElement) {
-		handleLinks(e, urlChan, visitedURLs, mu)
+		handleLinks(e, c, visitedURLs, mu)
 		// currentURL := e.Request.URL.String()
 		// if strings.Contains(currentURL, "fighter/stats") {
 		// 	handleFighterStats(e, fighterMap)
@@ -186,7 +194,7 @@ func setupCollectorCallbacks(c *colly.Collector, events *[]Event, mu *sync.Mutex
 	})
 }
 
-func handleLinks(e *colly.HTMLElement, urlChan chan<- string, visitedURLs map[string]bool, mu *sync.Mutex) {
+func handleLinks(e *colly.HTMLElement, c *colly.Collector, visitedURLs map[string]bool, mu *sync.Mutex) {
 	link := e.Attr("href")
 	absoluteURL := e.Request.AbsoluteURL(link)
 	if shouldVisitURL(absoluteURL) {
@@ -195,7 +203,7 @@ func handleLinks(e *colly.HTMLElement, urlChan chan<- string, visitedURLs map[st
 			visitedURLs[absoluteURL] = true
 			mu.Unlock()
 			fmt.Println("Queuing", absoluteURL)
-			urlChan <- absoluteURL
+			c.Visit(absoluteURL)
 		} else {
 			mu.Unlock()
 		}
