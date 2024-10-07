@@ -98,10 +98,22 @@ func main() {
 }
 
 func initializeCollector() *colly.Collector {
-	return colly.NewCollector(
+	c := colly.NewCollector(
 		colly.AllowedDomains("www.espn.com"),
 		colly.MaxDepth(3),
 	)
+
+	// Add rate limiting
+	err := c.Limit(&colly.LimitRule{
+		DomainGlob: "*espn.com*",
+		// Delay:       2 * time.Second, // 2 seconds delay between requests
+		// RandomDelay: 1 * time.Second, // Add up to 1 second of random delay
+	})
+	if err != nil {
+		log.Fatalf("Failed to set rate limit: %v", err)
+	}
+
+	return c
 }
 
 func scrapeData(c *colly.Collector) []Event {
@@ -201,7 +213,7 @@ func handleLinks(e *colly.HTMLElement, c *colly.Collector, visitedURLs map[strin
 func shouldVisitURL(url string) bool {
 	return (strings.Contains(url, "espn.com/mma/fightcenter") ||
 		strings.Contains(url, "espn.com/mma/fighter/")) &&
-		!strings.Contains(url, "news")
+		!strings.Contains(url, "news") && !strings.Contains(url, "stats") && !strings.Contains(url, "history") && !strings.Contains(url, "bio")
 }
 
 func extractEventData(e *colly.HTMLElement) Event {
