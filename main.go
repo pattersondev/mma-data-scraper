@@ -116,6 +116,33 @@ func initializeCollector() *colly.Collector {
 	return c
 }
 
+// func scrapeData(c *colly.Collector) []Event {
+// 	var events []Event
+// 	var mu sync.Mutex
+// 	visitedURLs := make(map[string]bool)
+// 	urlChan := make(chan string, 100)
+// 	var wg sync.WaitGroup
+
+// 	setupCollectorCallbacks(c, &events, &mu, visitedURLs)
+
+// 	// Start worker goroutines
+// 	for i := 0; i < 3; i++ { // Adjust the number of workers as needed
+// 		wg.Add(1)
+// 		go worker(c, urlChan, &wg, visitedURLs, &mu)
+// 	}
+
+// 	// Send initial URL
+// 	urlChan <- "https://www.espn.com/mma/"
+
+// 	// Wait for all goroutines to finish
+// 	wg.Wait()
+
+// 	// Close channel after all workers are done
+// 	close(urlChan)
+
+// 	return events
+// }
+
 func scrapeData(c *colly.Collector) []Event {
 	var events []Event
 	var mu sync.Mutex
@@ -128,19 +155,22 @@ func scrapeData(c *colly.Collector) []Event {
 	// Start worker goroutines
 	for i := 0; i < 3; i++ { // Adjust the number of workers as needed
 		wg.Add(1)
-		go worker(c, urlChan, &wg, visitedURLs, &mu)
+		go func() {
+			defer wg.Done()
+			worker(c, urlChan, &wg, visitedURLs, &mu)
+		}()
 	}
 
 	// Send initial URL
 	urlChan <- "https://www.espn.com/mma/"
 
-	// Close channel when all URLs have been processed
+	// Close channel after all URLs have been sent
 	go func() {
-		wg.Wait()
-		close(urlChan)
+		wg.Wait()      // Wait for all workers to finish
+		close(urlChan) // Then close the channel
 	}()
 
-	// Wait for all goroutines to finish
+	// Wait for all goroutines to finish before returning
 	wg.Wait()
 
 	return events
@@ -190,6 +220,11 @@ func setupCollectorCallbacks(c *colly.Collector, events *[]Event, mu *sync.Mutex
 			printEventInfo(event)
 		} else {
 			fmt.Println("Unhandled page type:", currentURL)
+			if currentURL == "https://www.espn.com/mma/" {
+				//Close channels, free up workers,
+				writeEventDataToJSON(*events)
+				os.Exit(0)
+			}
 		}
 	})
 }
